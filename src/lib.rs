@@ -11,12 +11,12 @@
 mod rev1 {
     //! not actually taking input, ignoring errors
 
-    // primitive parser
+    // primitive parser you can run to produce a value
     fn num() -> usize {
         10
     }
 
-    // a pair combinator
+    // a pair combinator that takes two parsers and gives a parser that consumed two items
     fn pair<F, FV, G, GV>(f: F, g: G) -> impl Fn() -> (FV, GV)
     where
         F: Fn() -> FV,
@@ -39,6 +39,8 @@ mod rev1 {
         assert_eq!(r, 40);
     }
 }
+
+// ------------------------------------------------------------------------------------------------------
 
 mod rev2 {
     //! add handling errors
@@ -71,6 +73,8 @@ mod rev2 {
         assert_eq!(r, Some(40));
     }
 }
+
+// ------------------------------------------------------------------------------------------------------
 
 mod rev3 {
     //! actually consume some input
@@ -119,6 +123,8 @@ mod rev3 {
     }
 }
 
+// ------------------------------------------------------------------------------------------------------
+
 mod rev4 {
     //! add some cosmetics.... Maybe.
     //! https://github.com/rust-lang/rust/issues/58052
@@ -133,6 +139,7 @@ mod rev4 {
         {
             f
         }
+
         annotate(move |input: &[usize]| match input {
             [v, rest @ ..] => Ok((*v, rest)),
             _ => Err(name),
@@ -140,23 +147,40 @@ mod rev4 {
     }
 }
 
+// ------------------------------------------------------------------------------------------------------
+
 mod rev5 {
-    // take a closer look at bind
+    // take a closer look at the question mark operator used in some context
 
     fn maybe_inc(a: Option<usize>) -> Option<usize> {
-        let a = a?;
-        Some(a + 1)
+        Some(a? + 1)
     }
 
-    fn maybe_inc2(a: Option<usize>) -> Option<usize> {
+    // it consists of following parts:
+    // - value in a container/context, here it's Option<a>
+    // - something that takes an unpacked value and gives you a new Option:
+    //   conceptually it's `|a| Some(a + 1)`
+    //
+    //   ? merges those parts together and gives Option<usize> back:
+    //   `Option<usize>` combined with `Fn(usize) -> Option<usize>` gives `Option<usize>` back
+    //
+    //  Or in general
+    //  `F<A>` + `Fn(A)->(B)` gives `F<B>` back
+
+    // you've seen this operation as `and_then`
+
+    fn maybe_and_then(a: Option<usize>) -> Option<usize> {
         #[allow(clippy::bind_instead_of_map)]
         a.and_then(|a| Some(a + 1))
     }
 
-    // in both cases `?` and `and_then` take  `a: Option<usize>` and `Fn(usize) -> Option<usize>`
-    // and produce Option<usize> back, let's see
+    fn result_and_then(a: Result<usize, String>) -> Result<usize, String> {
+        #[allow(clippy::bind_instead_of_map)]
+        a.and_then(|a| Ok(a + 1))
+    }
 }
 
+/*
 mod rev6 {
     #[allow(clippy::type_complexity)]
     struct Parser<T>(Box<dyn for<'a> Fn(&'a [usize]) -> Result<(T, &'a [usize]), &'static str>>);
@@ -186,27 +210,62 @@ mod rev6 {
         todo!("this should be doable with some persuasion")
     }
 }
+*/
 
+mod rev6 {
+    // and_then is limited to a specific type and is not very exciting to compose
+    // On the other hand there are iterators
+
+    pub trait Iter {
+        type Item;
+
+        // fn next(&mut self) -> Option<Self::Item>; // <- user must provide that
+
+        // fn rev(self) -> Rev<Self> { ... }
+        // fn skip(self, n: usize) -> Skip<Self> { ... }
+        // fn take(self, n: usize) -> Take<Self> { ... }
+        // fn filter<P>(self, predicate: P) -> Filter<Self, P> {..}
+
+        // fn sum(self) -> S {..}
+        // fn product(self) -> P {..}
+        // fn nth(&mut self) -> Option<Self::Item> {..}
+    }
+
+    impl<T> Iter for Vec<T> {
+        type Item = T;
+    }
+}
 mod rev7 {
     use core::marker::PhantomData;
-
-    trait Parser<T> {
-        fn bind<F, B, N>(self, f: F) -> Bind<Self, F, T, N, B>
+    // to make this work similarly to iterators we want a trait with some operations
+    // plus some types that implement it.
+    //
+    trait Parser<T: Clone>: Clone {
+        // Most interesting operation we care about is bind:
+        //
+        // that takes `impl Parser<T>` and `Fn(T) -> impl Parser<T>`
+        // and gives something that implements Parser<T> back.
+        fn bind<F, B, N>(&self, f: F) -> Bind<Self, F, T, N, B>
         where
-            F: Fn(T) -> N,
+            F: Fn(T) -> N, // N = impl Parser<B>
             N: Parser<B>,
             Self: Sized + Parser<T>,
+            B: Clone,
         {
+            // bind simply stores function and the parser plus keeps the context to keep
             Bind {
-                from: self,
+                from: self.clone(),
                 to: f,
                 ctx: PhantomData,
             }
         }
 
+        // second operation we care about is something that runs the parser -
+        // equivalent operation in Iterator is `next` and user needs to provide those.
         fn run<'a>(&self, input: &'a [usize]) -> Result<(T, &'a [usize]), &'static str>;
     }
 
+    #[derive(Clone)]
     struct Bind<S, F, A, N, B> {
         from: S,
         to: F,
@@ -215,9 +274,11 @@ mod rev7 {
 
     impl<S, F, A, N, B> Parser<B> for Bind<S, F, A, N, B>
     where
-        F: Fn(A) -> N,
+        F: Fn(A) -> N + Clone,
         N: Parser<B>,
         S: Parser<A>,
+        B: Clone,
+        A: Clone,
     {
         fn run<'a>(&self, input: &'a [usize]) -> Result<(B, &'a [usize]), &'static str> {
             let (a, input) = self.from.run(input)?;
@@ -225,12 +286,52 @@ mod rev7 {
         }
     }
 
+    // second useful operation would be "pure" - something that takes a value and puts it into
+    // monadic context. In `and_then`  and `?` those were `Ok` and `Some`, since we are working
+    // with traits - it can be a new type
+    //
+    // bind operation looks like this:
+    // Parser<A> + Fn(A) -> Parser<B>  => Parser<B>
+    //
+    // `Parser<A>` is usually present and users will have to come up with something of shape
+    // `Fn(A) -> Parser<B>` or even `Fn(A) -> Parser<A>` - `Pure` can do just that
+
+    #[derive(Clone)]
     struct Pure<T>(T);
+
     impl<T: Clone> Parser<T> for Pure<T> {
         fn run<'a>(&self, input: &'a [usize]) -> Result<(T, &'a [usize]), &'static str> {
             Ok((self.0.clone(), input))
         }
     }
+
+    // Now we can make a simple parser that takes a single input
+
+    #[derive(Clone, Copy)]
+    struct Num(&'static str /* field name used for error messages */);
+
+    // and implement a Parser for that
+    impl Parser<usize> for Num {
+        fn run<'a>(&self, input: &'a [usize]) -> Result<(usize, &'a [usize]), &'static str> {
+            match input {
+                [v, rest @ ..] => Ok((*v, rest)),
+                _ => Err(self.0),
+            }
+        }
+    }
+
+    // now we want syntax. ? comes with magical support from the compiler
+    // for bind we are going to steal it from Haskell
+    // a? binds result to some nameless expression, we are going to bind
+    // it to a named variable using `<-` operator, we'll call it bind
+    //
+    //     result <- monadic_expression;
+    //
+    // also we want to support regular expressions:
+    //
+    //     let result = non_monadic_expression;
+    //
+    // and tailing return syntax.
 
     macro_rules! mdo {
         ($pat:ident <- $mexpr:expr ; $($rest:tt)*) => {{
@@ -247,19 +348,7 @@ mod rev7 {
         }};
 
         ($a:expr) => {
-
-            // xxx.bind(|val|    ......
             Pure($a)
-        }
-    }
-
-    struct Num(&'static str);
-    impl Parser<usize> for Num {
-        fn run<'a>(&self, input: &'a [usize]) -> Result<(usize, &'a [usize]), &'static str> {
-            match input {
-                [v, rest @ ..] => Ok((*v, rest)),
-                _ => Err(self.0),
-            }
         }
     }
 
@@ -267,26 +356,29 @@ mod rev7 {
     where
         F: Parser<FV>,
         G: Parser<GV>,
-        GV: Clone,
-        FV: Clone,
+        GV: Copy,
+        FV: Copy,
     {
-        f.bind(move |fv| g.bind(move |gv| Pure((fv.clone(), gv.clone()))))
+        mdo! {
+            fv <- f;
+            gv <- g;
+            (fv, gv)
+        }
+    }
 
-        //        mdo! {
-        //            fv <- f;
-        //            gv <- g;
-        //            (fv, gv)
-        //        }
+    fn foo() -> impl Parser<(usize, usize, usize)> {
+        mdo! {
+            a <- Num("a");
+            b <- Num("b");
+            c <- Num("c");
+            (a, b, c)
+        }
     }
 
     fn parser(input: &[usize]) -> Result<usize, &'static str> {
         Ok(mdo! {
             nested <- mdo! {
-                ab <- mdo! {
-                    a <- Num("a");
-                    b <- Num("b");
-                    (a, b)
-                };
+                ab <- foo();
                 c <- Num("c");
                 (ab, c)
             };
@@ -296,6 +388,10 @@ mod rev7 {
         .run(input)?
         .0)
     }
-}
 
-// introduce trait
+    #[test]
+    fn this_works() {
+        let r = parser(&[1, 2, 3, 4, 5, 6]);
+        assert_eq!(r, Ok(12));
+    }
+}
